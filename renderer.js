@@ -7,6 +7,9 @@ const SERVER_URL = 'http://127.0.0.1:5000';
 // Cache for function signatures to avoid repeated API calls
 const functionCache = new Map();
 
+// Track imported modules to avoid duplicates in toolbox
+const importedModules = new Set();
+
 // Initialize Blockly when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
   initCustomBlocks();
@@ -17,6 +20,31 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // Initialize custom blocks
 function initCustomBlocks() {
+  // Define the import module block
+  Blockly.Blocks['import_module'] = {
+    init: function() {
+      const block = this;
+      const validator = function(newValue) {
+        if (block.importTimeout_) {
+          clearTimeout(block.importTimeout_);
+        }
+        block.importTimeout_ = setTimeout(() => {
+          syncToolboxWithImports();
+        }, 500);
+        return newValue;
+      };
+
+      this.appendDummyInput()
+          .appendField("import")
+          .appendField(new Blockly.FieldTextInput("math", validator), "MODULE_NAME");
+      this.setPreviousStatement(true, null);
+      this.setNextStatement(true, null);
+      this.setColour(230);
+      this.setTooltip("Import a Python library and add its functions to the toolbox.");
+      this.setHelpUrl("");
+    }
+  };
+
   // Define the dynamic function call block
   Blockly.Blocks['function_call'] = {
     init: function() {
@@ -49,11 +77,45 @@ function initCustomBlocks() {
 
       // Store function info
       this.functionInfo_ = null;
+      this.isStatement_ = false;
+    },
+
+    // Add context menu to toggle between statement and expression
+    customContextMenu: function(options) {
+      const block = this;
+      const option = {
+        text: this.isStatement_ ? "Use as Expression" : "Use as Statement",
+        enabled: true,
+        callback: function() {
+          block.setStatementMode(!block.isStatement_);
+        }
+      };
+      options.push(option);
+    },
+
+    setStatementMode: function(isStatement) {
+      if (this.isStatement_ === isStatement) {
+        return;
+      }
+      this.isStatement_ = isStatement;
+      this.updateShape_();
+    },
+
+    updateShape_: function() {
+      if (this.isStatement_) {
+        this.setOutput(false);
+        this.setPreviousStatement(true);
+        this.setNextStatement(true);
+      } else {
+        this.setPreviousStatement(false);
+        this.setNextStatement(false);
+        this.setOutput(true);
+      }
     },
 
     // Fetch function info from server and update block
     updateFunctionInfo: async function(funcName) {
-      if (!funcName || funcName.trim() === '') {
+      if (!funcName || funcName.trim() === '' || funcName === '...') {
         return;
       }
 
@@ -149,6 +211,7 @@ function initCustomBlocks() {
     mutationToDom: function() {
       const container = document.createElement('mutation');
       container.setAttribute('func_name', this.getFieldValue('FUNC_NAME'));
+      container.setAttribute('is_statement', this.isStatement_);
 
       if (this.functionInfo_) {
         container.setAttribute('params', JSON.stringify(this.functionInfo_.parameters.map(p => p.name)));
@@ -160,9 +223,206 @@ function initCustomBlocks() {
     // Load extra state from serialization
     domToMutation: function(xmlElement) {
       const funcName = xmlElement.getAttribute('func_name');
+      const isStatement = xmlElement.getAttribute('is_statement') === 'true';
+      this.setStatementMode(isStatement);
       if (funcName) {
         // Trigger async update
         this.updateFunctionInfo(funcName);
+      }
+    },
+
+    saveExtraState: function() {
+      return {
+        'func_name': this.getFieldValue('FUNC_NAME'),
+        'is_statement': this.isStatement_,
+        'params': this.functionInfo_ ? this.functionInfo_.parameters.map(p => p.name) : []
+      };
+    },
+
+    loadExtraState: function(state) {
+      if (state.is_statement !== undefined) {
+        this.setStatementMode(state.is_statement);
+      }
+      if (state.func_name) {
+        this.updateFunctionInfo(state.func_name);
+      }
+    }
+  };
+
+  // Define the dynamic function call block with dropdown for libraries
+  Blockly.Blocks['library_function_call'] = {
+    init: function() {
+      this.appendDummyInput('FUNCTION_NAME')
+          .appendField('call')
+          .appendField(new Blockly.FieldDropdown([['...', '...']]), 'FUNC_NAME');
+
+      this.setInputsInline(false);
+      this.setOutput(true, null);
+      this.setColour(290);
+      this.setTooltip('Call a function from the library.');
+      this.setHelpUrl('');
+
+      this.functionInfo_ = null;
+      this.isStatement_ = false;
+    },
+
+    // Re-use logic from function_call
+    updateFunctionInfo: Blockly.Blocks['function_call'].updateFunctionInfo,
+    applyFunctionInfo: Blockly.Blocks['function_call'].applyFunctionInfo,
+    customContextMenu: Blockly.Blocks['function_call'].customContextMenu,
+    setStatementMode: Blockly.Blocks['function_call'].setStatementMode,
+    updateShape_: Blockly.Blocks['function_call'].updateShape_,
+
+    mutationToDom: function() {
+      const container = Blockly.Blocks['function_call'].mutationToDom.call(this);
+      const dropdown = this.getField('FUNC_NAME');
+      if (dropdown && dropdown.menuGenerator_) {
+        const options = dropdown.menuGenerator_.map(opt => opt[1]);
+        container.setAttribute('options', JSON.stringify(options));
+      }
+      return container;
+    },
+    domToMutation: function(xmlElement) {
+      const funcName = xmlElement.getAttribute('func_name');
+      const optionsStr = xmlElement.getAttribute('options');
+      const isStatement = xmlElement.getAttribute('is_statement') === 'true';
+      this.setStatementMode(isStatement);
+      if (optionsStr) {
+        try {
+          const options = JSON.parse(optionsStr);
+          this.updateOptions(options);
+        } catch (e) {}
+      }
+      if (funcName) {
+        this.setFieldValue(funcName, 'FUNC_NAME');
+        this.updateFunctionInfo(funcName);
+      }
+    },
+
+    saveExtraState: function() {
+      const dropdown = this.getField('FUNC_NAME');
+      return {
+        'func_name': this.getFieldValue('FUNC_NAME'),
+        'is_statement': this.isStatement_,
+        'options': dropdown && dropdown.menuGenerator_ ? dropdown.menuGenerator_.map(opt => opt[1]) : []
+      };
+    },
+    loadExtraState: function(state) {
+      if (state.is_statement !== undefined) {
+        this.setStatementMode(state.is_statement);
+      }
+      if (state.options) {
+        this.updateOptions(state.options);
+      }
+      if (state.func_name) {
+        this.setFieldValue(state.func_name, 'FUNC_NAME');
+        this.updateFunctionInfo(state.func_name);
+      }
+    },
+
+    // Update dropdown options
+    updateOptions: function(options) {
+      const dropdown = this.getField('FUNC_NAME');
+      if (dropdown) {
+        const menuOptions = options.map(opt => [opt.split('.').pop(), opt]);
+        // If no options, add placeholder
+        if (menuOptions.length === 0) {
+          menuOptions.push(['...', '...']);
+        }
+        dropdown.menuGenerator_ = menuOptions;
+
+        // Add validator to trigger info update when selected
+        dropdown.setValidator((newValue) => {
+          this.updateFunctionInfo(newValue);
+          return newValue;
+        });
+      }
+    }
+  };
+
+  // Define the instance function call block
+  Blockly.Blocks['instance_function_call'] = {
+    init: function() {
+      this.appendDummyInput('INSTANCE')
+          .appendField('call')
+          .appendField(new Blockly.FieldVariable('item'), 'INSTANCE')
+          .appendField('.')
+          .appendField(new Blockly.FieldDropdown([['...', '...']]), 'METHOD');
+
+      this.setInputsInline(false);
+      this.setOutput(true, null);
+      this.setColour(290);
+      this.setTooltip('Call a method on an instance.');
+      this.setHelpUrl('');
+
+      this.functionInfo_ = null;
+      this.isStatement_ = false;
+      this.methodOptions_ = [];
+    },
+
+    updateFunctionInfo: function(methodName) {
+      updateInstanceMethodInfo(this, methodName);
+    },
+    applyFunctionInfo: Blockly.Blocks['function_call'].applyFunctionInfo,
+    customContextMenu: Blockly.Blocks['function_call'].customContextMenu,
+    setStatementMode: Blockly.Blocks['function_call'].setStatementMode,
+    updateShape_: Blockly.Blocks['function_call'].updateShape_,
+
+    updateOptions: function(options) {
+      this.methodOptions_ = options || [];
+      const dropdown = this.getField('METHOD');
+      if (dropdown) {
+        const menuOptions = this.methodOptions_.length
+          ? this.methodOptions_.map(opt => [opt, opt])
+          : [['...', '...']];
+        dropdown.menuGenerator_ = menuOptions;
+        dropdown.setValidator((newValue) => {
+          if (newValue && newValue !== '...') {
+            this.updateFunctionInfo(newValue);
+          }
+          return newValue;
+        });
+      }
+    },
+
+    mutationToDom: function() {
+      const container = Blockly.Blocks['function_call'].mutationToDom.call(this);
+      container.setAttribute('method_options', JSON.stringify(this.methodOptions_));
+      return container;
+    },
+    domToMutation: function(xmlElement) {
+      const methodOptions = xmlElement.getAttribute('method_options');
+      const funcName = xmlElement.getAttribute('func_name');
+      const isStatement = xmlElement.getAttribute('is_statement') === 'true';
+      this.setStatementMode(isStatement);
+      if (methodOptions) {
+        try {
+          this.updateOptions(JSON.parse(methodOptions));
+        } catch (e) {}
+      }
+      if (funcName) {
+        this.setFieldValue(funcName, 'METHOD');
+        this.updateFunctionInfo(funcName);
+      }
+    },
+
+    saveExtraState: function() {
+      return {
+        'func_name': this.getFieldValue('METHOD'),
+        'is_statement': this.isStatement_,
+        'method_options': this.methodOptions_
+      };
+    },
+    loadExtraState: function(state) {
+      if (state.is_statement !== undefined) {
+        this.setStatementMode(state.is_statement);
+      }
+      if (state.method_options) {
+        this.updateOptions(state.method_options);
+      }
+      if (state.func_name) {
+        this.setFieldValue(state.func_name, 'METHOD');
+        this.updateFunctionInfo(state.func_name);
       }
     }
   };
@@ -179,6 +439,11 @@ function initPythonGenerator() {
   // In newer Blockly versions, generators use forBlock namespace
   // In older versions, they're directly on the generator object
   const generatorTarget = Blockly.Python.forBlock || Blockly.Python;
+
+  generatorTarget['import_module'] = function(block) {
+    const moduleName = block.getFieldValue('MODULE_NAME');
+    return `import ${moduleName}\n`;
+  };
 
   generatorTarget['function_call'] = function(block) {
     const funcName = block.getFieldValue('FUNC_NAME');
@@ -217,6 +482,61 @@ function initPythonGenerator() {
     }
 
     const code = `${funcName}(${args.join(', ')})`;
+    if (block.isStatement_) {
+      return code + '\n';
+    }
+    return [code, Blockly.Python.ORDER_FUNCTION_CALL];
+  };
+
+  generatorTarget['library_function_call'] = generatorTarget['function_call'];
+  generatorTarget['instance_function_call'] = function(block) {
+    const instanceField = block.getField('INSTANCE');
+    const instanceModel = instanceField ? instanceField.getVariable() : null;
+    const instanceName = instanceModel ? instanceModel.name : block.getFieldValue('INSTANCE');
+    const rawMethodName = block.getFieldValue('METHOD');
+    const methodName = rawMethodName && rawMethodName.includes('.') ? rawMethodName.split('.').pop() : rawMethodName;
+    const funcInfo = block.functionInfo_;
+    const isStatement = !!(block.previousConnection || block.nextConnection);
+
+    if (!instanceName || !methodName || methodName === '...') {
+      return isStatement ? '' : ['None', Blockly.Python.ORDER_ATOMIC];
+    }
+
+    const callTarget = `${instanceName}.${methodName}`;
+
+    if (!funcInfo || !funcInfo.parameters || funcInfo.parameters.length === 0) {
+      const code = `${callTarget}()`;
+      if (isStatement) {
+        return code + '\n';
+      }
+      return [code, Blockly.Python.ORDER_FUNCTION_CALL];
+    }
+
+    const args = [];
+
+    for (const param of funcInfo.parameters) {
+      const inputName = `PARAM_${param.name}`;
+      const inputValue = Blockly.Python.valueToCode(block, inputName, Blockly.Python.ORDER_NONE);
+
+      if (inputValue) {
+        if (param.is_varargs) {
+          args.push(`*${inputValue}`);
+        } else if (param.is_varkwargs) {
+          args.push(`**${inputValue}`);
+        } else if (param.is_keyword_only || param.has_default) {
+          args.push(`${param.name}=${inputValue}`);
+        } else {
+          args.push(inputValue);
+        }
+      } else if (!param.has_default && !param.is_varargs && !param.is_varkwargs) {
+        args.push('None');
+      }
+    }
+
+    const code = `${callTarget}(${args.join(', ')})`;
+    if (isStatement) {
+      return code + '\n';
+    }
     return [code, Blockly.Python.ORDER_FUNCTION_CALL];
   };
 }
@@ -432,7 +752,9 @@ function initBlockly() {
         name: 'Python',
         colour: '#4B8BBE',
         contents: [
+          { kind: 'block', type: 'import_module' },
           { kind: 'block', type: 'function_call' },
+          { kind: 'block', type: 'instance_function_call' },
         ],
       },
     ],
@@ -458,13 +780,249 @@ function initBlockly() {
     },
   });
 
+  // Store initial toolbox structure
+  workspace.initialToolbox = JSON.parse(JSON.stringify(toolbox));
+
   // Update code preview on block change
   workspace.addChangeListener(updateCodePreview);
+
+  // Listen for block creation and changes to trigger library loading
+  workspace.addChangeListener((event) => {
+    // Sync toolbox for import blocks
+    if (event.type === Blockly.Events.BLOCK_CREATE ||
+        event.type === Blockly.Events.BLOCK_DELETE ||
+        (event.type === Blockly.Events.BLOCK_CHANGE && event.name === 'MODULE_NAME')) {
+      syncToolboxWithImports();
+    }
+
+    // Update function info for call blocks
+    if (event.type === Blockly.Events.BLOCK_CREATE) {
+      const block = workspace.getBlockById(event.blockId);
+      if (block && (block.type === 'function_call' || block.type === 'library_function_call')) {
+        const funcName = block.getFieldValue('FUNC_NAME');
+        if (funcName && funcName !== '...') {
+          block.updateFunctionInfo(funcName);
+        }
+      } else if (block && block.type === 'instance_function_call') {
+        updateInstanceMethodsForBlock(block);
+      }
+    } else if (event.type === Blockly.Events.BLOCK_CHANGE && event.name === 'FUNC_NAME') {
+      const block = workspace.getBlockById(event.blockId);
+      if (block && (block.type === 'function_call' || block.type === 'library_function_call')) {
+        block.updateFunctionInfo(event.newValue);
+      }
+    } else if (event.type === Blockly.Events.BLOCK_CHANGE && event.name === 'INSTANCE') {
+      const block = workspace.getBlockById(event.blockId);
+      if (block && block.type === 'instance_function_call') {
+        updateInstanceMethodsForBlock(block);
+      }
+    } else if (event.type === Blockly.Events.BLOCK_CHANGE && event.name === 'METHOD') {
+      const block = workspace.getBlockById(event.blockId);
+      if (block && block.type === 'instance_function_call') {
+        const methodName = block.getFieldValue('METHOD');
+        if (methodName && methodName !== '...') {
+          block.updateFunctionInfo(methodName);
+        }
+      }
+    }
+  });
+}
+
+let syncTimeout;
+/**
+ * Synchronizes the toolbox with the current import blocks in the workspace.
+ */
+async function syncToolboxWithImports() {
+  if (syncTimeout) {
+    clearTimeout(syncTimeout);
+  }
+
+  syncTimeout = setTimeout(async () => {
+    const blocks = workspace.getAllBlocks(false);
+    const currentImports = new Set();
+
+    for (const block of blocks) {
+      if (block.type === 'import_module') {
+        const moduleName = block.getFieldValue('MODULE_NAME');
+        if (moduleName) {
+          currentImports.add(moduleName);
+        }
+      }
+    }
+
+    // Check for modules to add
+    for (const moduleName of currentImports) {
+      if (!importedModules.has(moduleName)) {
+        await loadModuleInfo(moduleName);
+      }
+    }
+
+    // Check for modules to remove
+    let changed = false;
+    for (const moduleName of importedModules) {
+      if (!currentImports.has(moduleName)) {
+        importedModules.delete(moduleName);
+        changed = true;
+      }
+    }
+
+    if (changed || [...currentImports].some(m => !isModuleInToolbox(m))) {
+      updateToolboxDisplay();
+    }
+  }, 100);
+}
+
+// Cache for module function lists
+const moduleFunctionCache = new Map();
+
+async function loadModuleInfo(moduleName) {
+  if (moduleFunctionCache.has(moduleName)) {
+    importedModules.add(moduleName);
+    return;
+  }
+
+  try {
+    const response = await fetch(`${SERVER_URL}/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ module: moduleName })
+    });
+
+    const info = await response.json();
+    if (info.success) {
+      moduleFunctionCache.set(moduleName, info.functions);
+      importedModules.add(moduleName);
+    }
+  } catch (error) {
+    console.error(`Error loading module ${moduleName}:`, error);
+  }
+}
+
+function isModuleInToolbox(moduleName) {
+  const currentToolbox = workspace.options.languageTree;
+  return currentToolbox.contents.some(cat => cat.kind === 'category' && cat.name === moduleName);
+}
+
+function updateToolboxDisplay() {
+  const toolbox = JSON.parse(JSON.stringify(workspace.initialToolbox));
+
+  for (const moduleName of importedModules) {
+    const functions = moduleFunctionCache.get(moduleName);
+    if (functions) {
+      toolbox.contents.push({
+        kind: 'category',
+        name: moduleName,
+        colour: '#4B8BBE',
+        contents: [
+          {
+            kind: 'block',
+            type: 'library_function_call',
+            extraState: {
+              'func_name': functions[0],
+              'options': functions
+            }
+          }
+        ]
+      });
+    }
+  }
+
+  workspace.updateToolbox(toolbox);
+}
+
+const instanceMethodCache = new Map();
+
+async function updateInstanceMethodsForBlock(block) {
+  if (!block || block.disposed) {
+    return;
+  }
+
+  const instanceField = block.getField('INSTANCE');
+  const instanceModel = instanceField ? instanceField.getVariable() : null;
+  const instanceName = instanceModel ? instanceModel.name : block.getFieldValue('INSTANCE');
+  if (!instanceName) {
+    return;
+  }
+
+  // Use a debounce to avoid rapid-fire requests while dragging/typing
+  if (block.updateTimer_) {
+    clearTimeout(block.updateTimer_);
+  }
+
+  block.updateTimer_ = setTimeout(async () => {
+    try {
+      const code = Blockly.Python.workspaceToCode(workspace);
+
+      const response = await fetch(`${SERVER_URL}/inspect-instance`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, instance: instanceName })
+      });
+
+      const info = await response.json();
+      if (info.success) {
+        const methods = info.methods || [];
+
+        const currentMethod = block.getFieldValue('METHOD');
+        block.updateOptions(methods);
+
+        if (methods.length > 0) {
+          if (!currentMethod || currentMethod === '...' || !methods.includes(currentMethod)) {
+            block.setFieldValue(methods[0], 'METHOD');
+            block.updateFunctionInfo(methods[0]);
+          }
+        }
+      } else {
+        console.warn(`Instance inspection failed for ${instanceName}: ${info.error}`);
+        block.updateOptions([]);
+      }
+    } catch (error) {
+      console.error('Failed to inspect instance:', error);
+    }
+  }, 300);
+}
+
+async function updateInstanceMethodInfo(block, methodName) {
+  if (!block || block.disposed || !methodName || methodName === '...') {
+    return;
+  }
+
+  const instanceField = block.getField('INSTANCE');
+  const instanceModel = instanceField ? instanceField.getVariable() : null;
+  const instanceName = instanceModel ? instanceModel.name : block.getFieldValue('INSTANCE');
+  if (!instanceName) {
+    return;
+  }
+
+  const cleanMethod = methodName.includes('.') ? methodName.split('.').pop() : methodName;
+
+  try {
+    const code = Blockly.Python.workspaceToCode(workspace);
+    const response = await fetch(`${SERVER_URL}/inspect-instance-method`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, instance: instanceName, method: cleanMethod })
+    });
+
+    const info = await response.json();
+    if (info.success) {
+      block.applyFunctionInfo(info);
+      block.functionInfo_ = info;
+    } else {
+      block.setTooltip(`Error: ${info.error}`);
+    }
+  } catch (error) {
+    console.error('Failed to fetch instance method info:', error);
+  }
 }
 
 function updateCodePreview() {
-  const code = Blockly.Python.workspaceToCode(workspace);
-  document.getElementById('code-preview').textContent = code;
+  try {
+    const code = Blockly.Python.workspaceToCode(workspace);
+    document.getElementById('code-preview').textContent = code;
+  } catch (error) {
+    console.error('Failed to generate code preview:', error);
+  }
 }
 
 async function runCode() {
@@ -569,6 +1127,12 @@ function clearWorkspace() {
     workspace.clear();
     updateCodePreview();
     document.getElementById('output-content').innerHTML = '';
+
+    // Reset toolbox to initial state
+    if (workspace.initialToolbox) {
+      workspace.updateToolbox(workspace.initialToolbox);
+      importedModules.clear();
+    }
   }
 }
 

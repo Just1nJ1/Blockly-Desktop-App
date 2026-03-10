@@ -10,6 +10,7 @@ import io
 import traceback
 import inspect
 import builtins
+import importlib
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 
@@ -40,16 +41,30 @@ class FunctionInspector:
         - error: error message if inspection failed
         """
         try:
-            # Try to get the function from builtins
-            if func_name not in FunctionInspector.AVAILABLE_BUILTINS:
-                # Also check if it's a valid builtin not in our restricted list
-                if not hasattr(builtins, func_name):
+            # Check if it's a module.function pattern
+            if '.' in func_name:
+                parts = func_name.rsplit('.', 1)
+                module_path = parts[0]
+                function_name = parts[1]
+                try:
+                    module = importlib.import_module(module_path)
+                    func = getattr(module, function_name)
+                except (ImportError, AttributeError):
                     return {
                         'success': False,
-                        'error': f'Function "{func_name}" not found in available builtins'
+                        'error': f'Function "{function_name}" not found in module "{module_path}"'
                     }
+            else:
+                # Try to get the function from builtins
+                if func_name not in FunctionInspector.AVAILABLE_BUILTINS:
+                    # Also check if it's a valid builtin not in our restricted list
+                    if not hasattr(builtins, func_name):
+                        return {
+                            'success': False,
+                            'error': f'Function "{func_name}" not found in available builtins'
+                        }
 
-            func = getattr(builtins, func_name)
+                func = getattr(builtins, func_name)
 
             if not callable(func):
                 return {
@@ -145,9 +160,107 @@ class FunctionInspector:
         """Return a list of available function names."""
         return FunctionInspector.AVAILABLE_BUILTINS
 
+    @staticmethod
+    def list_module_functions(module_path: str) -> dict:
+        """List all public functions in a module."""
+        try:
+            module = importlib.import_module(module_path)
+            functions = []
+            for name, obj in inspect.getmembers(module):
+                # Only include public functions/callables
+                if not name.startswith('_') and callable(obj):
+                    functions.append(f"{module_path}.{name}")
+
+            return {
+                'success': True,
+                'module': module_path,
+                'functions': sorted(functions)
+            }
+        except ImportError as e:
+            return {
+                'success': False,
+                'error': f'Module "{module_path}" not found: {str(e)}'
+            }
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f'Error listing functions for "{module_path}": {str(e)}'
+            }
+
 
 class CodeExecutor:
     """Handles safe execution of Python code."""
+
+    @staticmethod
+    def _safe_globals() -> dict:
+        return {
+            '__builtins__': {
+                'print': print,
+                'len': len,
+                'range': range,
+                'enumerate': enumerate,
+                'zip': zip,
+                'map': map,
+                'filter': filter,
+                'sum': sum,
+                'min': min,
+                'max': max,
+                'abs': abs,
+                'round': round,
+                'pow': pow,
+                'divmod': divmod,
+                'int': int,
+                'float': float,
+                'str': str,
+                'bool': bool,
+                'list': list,
+                'dict': dict,
+                'tuple': tuple,
+                'set': set,
+                'type': type,
+                'isinstance': isinstance,
+                'hasattr': hasattr,
+                'getattr': getattr,
+                'setattr': setattr,
+                'dir': dir,
+                'chr': chr,
+                'ord': ord,
+                'hex': hex,
+                'bin': bin,
+                'oct': oct,
+                'format': format,
+                'sorted': sorted,
+                'reversed': reversed,
+                'any': any,
+                'all': all,
+                'vars': vars,
+                'locals': locals,
+                'globals': globals,
+                'repr': repr,
+                'ascii': ascii,
+                'callable': callable,
+                'classmethod': classmethod,
+                'staticmethod': staticmethod,
+                'property': property,
+                'slice': slice,
+                'complex': complex,
+                'frozenset': frozenset,
+                'bytearray': bytearray,
+                'bytes': bytes,
+                'memoryview': memoryview,
+                'hash': hash,
+                'help': help,
+                'id': id,
+                'input': input,
+                'iter': iter,
+                'next': next,
+                'object': object,
+                'super': super,
+                '__import__': __import__,
+                '__name__': '__main__',
+                '__doc__': None,
+            }
+        }
 
     @staticmethod
     def execute(code: str) -> dict:
@@ -175,74 +288,7 @@ class CodeExecutor:
             sys.stderr = stderr_buffer
 
             # Create a sandboxed globals dict with basic safe builtins
-            safe_globals = {
-                '__builtins__': {
-                    'print': print,
-                    'len': len,
-                    'range': range,
-                    'enumerate': enumerate,
-                    'zip': zip,
-                    'map': map,
-                    'filter': filter,
-                    'sum': sum,
-                    'min': min,
-                    'max': max,
-                    'abs': abs,
-                    'round': round,
-                    'pow': pow,
-                    'divmod': divmod,
-                    'int': int,
-                    'float': float,
-                    'str': str,
-                    'bool': bool,
-                    'list': list,
-                    'dict': dict,
-                    'tuple': tuple,
-                    'set': set,
-                    'type': type,
-                    'isinstance': isinstance,
-                    'hasattr': hasattr,
-                    'getattr': getattr,
-                    'setattr': setattr,
-                    'dir': dir,
-                    'chr': chr,
-                    'ord': ord,
-                    'hex': hex,
-                    'bin': bin,
-                    'oct': oct,
-                    'format': format,
-                    'sorted': sorted,
-                    'reversed': reversed,
-                    'any': any,
-                    'all': all,
-                    'vars': vars,
-                    'locals': locals,
-                    'globals': globals,
-                    'repr': repr,
-                    'ascii': ascii,
-                    'callable': callable,
-                    'classmethod': classmethod,
-                    'staticmethod': staticmethod,
-                    'property': property,
-                    'slice': slice,
-                    'complex': complex,
-                    'frozenset': frozenset,
-                    'bytearray': bytearray,
-                    'bytes': bytes,
-                    'memoryview': memoryview,
-                    'hash': hash,
-                    'help': help,
-                    'id': id,
-                    'input': input,
-                    'iter': iter,
-                    'next': next,
-                    'object': object,
-                    'super': super,
-                    '__import__': __import__,
-                    '__name__': '__main__',
-                    '__doc__': None,
-                }
-            }
+            safe_globals = CodeExecutor._safe_globals()
 
             # Compile and execute the code
             try:
@@ -293,6 +339,165 @@ class CodeExecutor:
 
 class RequestHandler(BaseHTTPRequestHandler):
     """HTTP request handler for the Blockly server."""
+
+    def _build_safe_globals(self, code: str) -> dict:
+        # Extract imports to load third-party libraries in advance
+        import_lines = []
+        for line in code.split('\n'):
+            if line.strip().startswith(('import ', 'from ')):
+                import_lines.append(line)
+
+        safe_globals = CodeExecutor._safe_globals()
+        for imp in import_lines:
+            try:
+                exec(imp, safe_globals)
+            except Exception:
+                pass
+
+        try:
+            exec(compile(code, '<blockly>', 'exec'), safe_globals)
+        except Exception:
+            # Ignore execution errors; we just need whatever variables did get defined
+            pass
+
+        return safe_globals
+
+    def _inspect_instance_members(self, code: str, instance_name: str) -> dict:
+        try:
+            safe_globals = self._build_safe_globals(code)
+
+            if instance_name not in safe_globals:
+                return {
+                    'success': False,
+                    'error': f'Instance "{instance_name}" not found. Make sure the code defining it is valid.'
+                }
+
+            instance = safe_globals[instance_name]
+            methods = []
+            fields = []
+
+            for name, attr in inspect.getmembers(instance):
+                if name.startswith('_'):
+                    continue
+
+                if callable(attr):
+                    methods.append(name)
+                else:
+                    fields.append(name)
+
+            return {
+                'success': True,
+                'instance': instance_name,
+                'class_name': type(instance).__name__,
+                'methods': sorted(methods),
+                'fields': sorted(fields)
+            }
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f'Error inspecting instance: {str(e)}'
+            }
+
+    def _inspect_instance_method(self, code: str, instance_name: str, method_name: str) -> dict:
+        try:
+            safe_globals = self._build_safe_globals(code)
+
+            if instance_name not in safe_globals:
+                return {
+                    'success': False,
+                    'error': f'Instance "{instance_name}" not found. Make sure the code defining it is valid.'
+                }
+
+            instance = safe_globals[instance_name]
+            if not hasattr(instance, method_name):
+                return {
+                    'success': False,
+                    'error': f'Method "{method_name}" not found on instance "{instance_name}"'
+                }
+
+            method = getattr(instance, method_name)
+            if not callable(method):
+                return {
+                    'success': False,
+                    'error': f'"{method_name}" is not callable on "{instance_name}"'
+                }
+
+            docstring = inspect.getdoc(method) or 'No documentation available.'
+            try:
+                sig = inspect.signature(method)
+            except (ValueError, TypeError):
+                return {
+                    'success': True,
+                    'name': method_name,
+                    'docstring': docstring,
+                    'parameters': [],
+                    'has_varargs': False,
+                    'has_varkwargs': False
+                }
+
+            parameters = []
+            has_varargs = False
+            has_varkwargs = False
+
+            for param_name, param in sig.parameters.items():
+                if param_name == 'self':
+                    continue
+
+                param_info = {
+                    'name': param_name,
+                    'kind': str(param.kind.name),
+                }
+
+                if param.kind == inspect.Parameter.VAR_POSITIONAL:
+                    param_info['kind'] = 'VAR_POSITIONAL'
+                    param_info['is_varargs'] = True
+                    has_varargs = True
+                elif param.kind == inspect.Parameter.VAR_KEYWORD:
+                    param_info['kind'] = 'VAR_KEYWORD'
+                    param_info['is_varkwargs'] = True
+                    has_varkwargs = True
+                elif param.kind == inspect.Parameter.KEYWORD_ONLY:
+                    param_info['kind'] = 'KEYWORD_ONLY'
+                    param_info['is_keyword_only'] = True
+                elif param.kind == inspect.Parameter.POSITIONAL_ONLY:
+                    param_info['kind'] = 'POSITIONAL_ONLY'
+                    param_info['is_positional_only'] = True
+                else:
+                    param_info['kind'] = 'POSITIONAL_OR_KEYWORD'
+
+                if param.default is not inspect.Parameter.empty:
+                    param_info['has_default'] = True
+                    try:
+                        param_info['default'] = repr(param.default)
+                    except:
+                        param_info['default'] = str(param.default)
+                else:
+                    param_info['has_default'] = False
+                    param_info['default'] = None
+
+                if param.annotation is not inspect.Parameter.empty:
+                    try:
+                        param_info['annotation'] = str(param.annotation)
+                    except:
+                        param_info['annotation'] = None
+                else:
+                    param_info['annotation'] = None
+
+                parameters.append(param_info)
+
+            return {
+                'success': True,
+                'name': method_name,
+                'docstring': docstring,
+                'parameters': parameters,
+                'has_varargs': has_varargs,
+                'has_varkwargs': has_varkwargs
+            }
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f'Error inspecting method: {str(e)}'
+            }
 
     def log_message(self, format, *args):
         """Override to customize logging."""
@@ -381,6 +586,115 @@ class RequestHandler(BaseHTTPRequestHandler):
                     return
 
                 result = FunctionInspector.inspect_function(func_name)
+                self._send_json_response(result)
+
+            except json.JSONDecodeError as e:
+                self._send_json_response({
+                    'success': False,
+                    'error': f'Invalid JSON: {str(e)}'
+                }, 400)
+            except Exception as e:
+                self._send_json_response({
+                    'success': False,
+                    'error': f'Server error: {str(e)}'
+                }, 500)
+        elif self.path == '/import':
+            # List functions in a module
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length).decode('utf-8')
+
+            try:
+                request = json.loads(post_data)
+                module_name = request.get('module', '')
+
+                if not module_name:
+                    self._send_json_response({
+                        'success': False,
+                        'error': 'No module name provided'
+                    }, 400)
+                    return
+
+                result = FunctionInspector.list_module_functions(module_name)
+                self._send_json_response(result)
+
+            except json.JSONDecodeError as e:
+                self._send_json_response({
+                    'success': False,
+                    'error': f'Invalid JSON: {str(e)}'
+                }, 400)
+            except Exception as e:
+                self._send_json_response({
+                    'success': False,
+                    'error': f'Server error: {str(e)}'
+                }, 500)
+        elif self.path == '/inspect-instance':
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length).decode('utf-8')
+
+            try:
+                request = json.loads(post_data)
+                code = request.get('code', '')
+                instance_name = request.get('instance', '')
+
+                if not code:
+                    self._send_json_response({
+                        'success': False,
+                        'error': 'No code provided'
+                    }, 400)
+                    return
+
+                if not instance_name:
+                    self._send_json_response({
+                        'success': False,
+                        'error': 'No instance name provided'
+                    }, 400)
+                    return
+
+                result = self._inspect_instance_members(code, instance_name)
+                self._send_json_response(result)
+
+            except json.JSONDecodeError as e:
+                self._send_json_response({
+                    'success': False,
+                    'error': f'Invalid JSON: {str(e)}'
+                }, 400)
+            except Exception as e:
+                self._send_json_response({
+                    'success': False,
+                    'error': f'Server error: {str(e)}'
+                }, 500)
+        elif self.path == '/inspect-instance-method':
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length).decode('utf-8')
+
+            try:
+                request = json.loads(post_data)
+                code = request.get('code', '')
+                instance_name = request.get('instance', '')
+                method_name = request.get('method', '')
+
+                if not code:
+                    self._send_json_response({
+                        'success': False,
+                        'error': 'No code provided'
+                    }, 400)
+                    return
+
+                if not instance_name:
+                    self._send_json_response({
+                        'success': False,
+                        'error': 'No instance name provided'
+                    }, 400)
+                    return
+
+                if not method_name:
+                    self._send_json_response({
+                        'success': False,
+                        'error': 'No method name provided'
+                    }, 400)
+                    return
+
+                result = self._inspect_instance_method(code, instance_name, method_name)
                 self._send_json_response(result)
 
             except json.JSONDecodeError as e:
